@@ -5289,7 +5289,7 @@ static int e1000_resume(struct pci_dev *pdev)
 
 static void e1000_shutdown(struct pci_dev *pdev)
 {
-	bool wake = false;
+	bool wake;
 
 	__e1000_shutdown(pdev, &wake);
 

@@ -24,7 +24,7 @@
 #include <linux/netdevice.h>
 #include <linux/version.h>
 
-#ifdef CONFIG_PCI
+#ifdef CONFIG_GENERIC_ISA_DMA
 #include <asm/dma.h>
 #else
 #define free_dma(X)
@@ -249,9 +249,11 @@ struct ccat_mac_register {
 	u8 mii_connected;
 };
 
+static void ccat_eth_fifo_reset(struct ccat_eth_fifo *const fifo);
 static void fifo_set_end(struct ccat_eth_fifo *const fifo, size_t size)
 {
 	fifo->end = fifo->mem.start + size - sizeof(struct ccat_eth_frame);
+	ccat_eth_fifo_reset(fifo);
 }
 
 static void ccat_dma_free(struct ccat_eth_priv *const priv)
@@ -292,7 +294,7 @@ static int ccat_dma_init(struct ccat_dma_mem *const dma, size_t channel,
 	iowrite32((u32) phys | ((phys_hi) > 0), ioaddr);
 	iowrite32(phys_hi, ioaddr + 4);
 
-	pr_debug
+	pr_info
 	    ("DMA%llu mem initialized\n base:         0x%p\n start:        0x%p\n phys:         0x%09llx\n pci addr:     0x%01x%08x\n size:         %llu |%llx bytes.\n",
 	     (u64) channel, dma->base, fifo->dma.start, (u64) dma->phys,
 	     ioread32(ioaddr + 4), ioread32(ioaddr),
@@ -539,7 +541,12 @@ static int ccat_eth_priv_init_dma(struct ccat_eth_priv *priv)
 	dma->dev = &pdev->dev;
 	dma->size = CCAT_ALIGNMENT * 3;
 	dma->base =
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
+        /* since kernel 5 memory is zero'd implicitly */
+	    dma_alloc_coherent(dma->dev, dma->size, &dma->phys, GFP_KERNEL);
+#else
 	    dma_zalloc_coherent(dma->dev, dma->size, &dma->phys, GFP_KERNEL);
+#endif
 	if (!dma->base || !dma->phys) {
 		pr_err("init DMA memory failed.\n");
 		return -ENOMEM;
@@ -750,12 +757,14 @@ static void poll_link(struct ccat_eth_priv *const priv)
 static void poll_rx(struct ccat_eth_priv *const priv)
 {
 	struct ccat_eth_fifo *const fifo = &priv->rx_fifo;
-	const size_t len = fifo->ops->ready(fifo);
+	size_t rx_per_poll = FIFO_LENGTH / 2;
+	size_t len = fifo->ops->ready(fifo);
 
-	if (len) {
+	while (len && --rx_per_poll) {
 		priv->receive(priv, len);
 		fifo->ops->add(fifo);
 		ccat_eth_fifo_inc(fifo);
+		len = fifo->ops->ready(fifo);
 	}
 }
 
@@ -887,8 +896,18 @@ static int ccat_eth_init_netdev(struct ccat_eth_priv *priv)
 	int status;
 
 	/* init netdev with MAC and stack callbacks */
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+	u8 mac_addr[ETH_ALEN];
+
+	if (priv->netdev->addr_len != ETH_ALEN)
+		return -EFAULT;
+	memcpy_fromio(mac_addr, priv->reg.mii + 8, ETH_ALEN);
+	eth_hw_addr_set(priv->netdev, mac_addr);
+#else
 	memcpy_fromio(priv->netdev->dev_addr, priv->reg.mii + 8,
 		      priv->netdev->addr_len);
+#endif
 	priv->netdev->netdev_ops = &ccat_eth_netdev_ops;
 
 	/* use as EtherCAT device? */

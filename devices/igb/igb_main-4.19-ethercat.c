@@ -57,7 +57,7 @@ enum tx_queue_prio {
 char igb_driver_name[] = "ec_igb";
 char igb_driver_version[] = DRV_VERSION;
 static const char igb_driver_string[] =
-				"Intel(R) Gigabit Ethernet Network Driver (EtherCAT-enabled)";
+				"Intel(R) Gigabit Ethernet Network Driver (EtherCAT enabled)";
 static const char igb_copyright[] =
 				"Copyright (c) 2007-2014 Intel Corporation.";
 
@@ -2091,7 +2091,8 @@ static void igb_check_swap_media(struct igb_adapter *adapter)
 	if ((hw->phy.media_type == e1000_media_type_copper) &&
 	    (!(connsw & E1000_CONNSW_AUTOSENSE_EN))) {
 		swap_now = true;
-	} else if (!(connsw & E1000_CONNSW_SERDESD)) {
+	} else if ((hw->phy.media_type != e1000_media_type_copper) &&
+		   !(connsw & E1000_CONNSW_SERDESD)) {
 		/* copper signal takes time to appear */
 		if (adapter->copper_tries < 4) {
 			adapter->copper_tries++;
@@ -2918,12 +2919,12 @@ static const struct net_device_ops igb_netdev_ops = {
 };
 
 /**
- * ec_poll - EtherCAT poll routine
- * @netdev: net device structure
- *
- * This function can never fail.
- *
- **/
+* ec_poll - EtherCAT poll routine
+* @netdev: net device structure
+*
+* This function can never fail.
+*
+**/
 void ec_poll(struct net_device *netdev)
 {
 	struct igb_adapter *adapter = netdev_priv(netdev);
@@ -4744,12 +4745,12 @@ static void igb_clean_tx_ring(struct igb_ring *tx_ring)
 {
 	u16 i = tx_ring->next_to_clean;
 	struct igb_tx_buffer *tx_buffer = &tx_ring->tx_buffer_info[i];
-	struct igb_adapter *adapter = netdev_priv(tx_ring->netdev);
 
 	while (i != tx_ring->next_to_use) {
 		union e1000_adv_tx_desc *eop_desc, *tx_desc;
 
 		/* Free all the Tx ring sk_buffs */
+		struct igb_adapter *adapter = netdev_priv(tx_ring->netdev);
 		if (!adapter->ecdev) {
 			/* skb is reused in EtherCAT TX operation */
 			dev_kfree_skb_any(tx_buffer->skb);
@@ -5804,6 +5805,7 @@ static void igb_tx_ctxtdesc(struct igb_ring *tx_ring,
 	 */
 	if (tx_ring->launchtime_enable) {
 		ts = ns_to_timespec64(first->skb->tstamp);
+		first->skb->tstamp = 0;
 		context_desc->seqnum_seed = cpu_to_le32(ts.tv_nsec / 32);
 	} else {
 		context_desc->seqnum_seed = 0;
@@ -6184,8 +6186,11 @@ dma_error:
 				 DMA_TO_DEVICE);
 	dma_unmap_len_set(tx_buffer, len, 0);
 
-	dev_kfree_skb_any(tx_buffer->skb);
-	tx_buffer->skb = NULL;
+	struct igb_adapter *adapter = netdev_priv(tx_ring->netdev);
+	if (!adapter->ecdev) {
+		dev_kfree_skb_any(tx_buffer->skb);
+		tx_buffer->skb = NULL;
+	}
 
 	tx_ring->next_to_use = i;
 
@@ -6265,12 +6270,12 @@ netdev_tx_t igb_xmit_frame_ring(struct sk_buff *skb,
 	return NETDEV_TX_OK;
 
 out_drop:
-	dev_kfree_skb_any(first->skb);
-	first->skb = NULL;
+	if (!adapter->ecdev) {
+		dev_kfree_skb_any(first->skb);
+		first->skb = NULL;
+	}
 cleanup_tx_tstamp:
-	if (unlikely(tx_flags & IGB_TX_FLAGS_TSTAMP)) {
-		struct igb_adapter *adapter = netdev_priv(tx_ring->netdev);
-
+	if (unlikely(!adapter->ecdev && tx_flags & IGB_TX_FLAGS_TSTAMP)) {
 		dev_kfree_skb_any(adapter->ptp_tx_skb);
 		adapter->ptp_tx_skb = NULL;
 		if (adapter->hw.mac.type == e1000_82576)
@@ -6331,9 +6336,18 @@ static void igb_reset_task(struct work_struct *work)
 	struct igb_adapter *adapter;
 	adapter = container_of(work, struct igb_adapter, reset_task);
 
+	rtnl_lock();
+	/* If we're already down or resetting, just bail */
+	if (test_bit(__IGB_DOWN, &adapter->state) ||
+	    test_bit(__IGB_RESETTING, &adapter->state)) {
+		rtnl_unlock();
+		return;
+	}
+
 	igb_dump(adapter);
 	netdev_err(adapter->netdev, "Reset adapter\n");
 	igb_reinit_locked(adapter);
+	rtnl_unlock();
 }
 
 /**
@@ -8472,30 +8486,33 @@ static int igb_clean_rx_irq(struct igb_q_vector *q_vector, const int budget)
 
 		rx_buffer = igb_get_rx_buffer(rx_ring, size);
 
-		/* retrieve a buffer from the ring */
 		if (adapter->ecdev) {
 			unsigned char *va = page_address(rx_buffer->page) + rx_buffer->page_offset;
 			unsigned int size = le16_to_cpu(rx_desc->wb.upper.length);
 			ecdev_receive(adapter->ecdev, va, size);
 			adapter->ec_watchdog_jiffies = jiffies;
-
+			igb_reuse_rx_page(rx_ring, rx_buffer);
 		}
-		else if (skb)
-			igb_add_rx_frag(rx_ring, rx_buffer, skb, size);
-		else if (ring_uses_build_skb(rx_ring))
-			skb = igb_build_skb(rx_ring, rx_buffer, rx_desc, size);
-		else
-			skb = igb_construct_skb(rx_ring, rx_buffer,
-						rx_desc, size);
+		else {
+			/* retrieve a buffer from the ring */
+			if (skb)
+				igb_add_rx_frag(rx_ring, rx_buffer, skb, size);
+			else if (ring_uses_build_skb(rx_ring))
+				skb = igb_build_skb(rx_ring, rx_buffer, rx_desc, size);
+			else
+				skb = igb_construct_skb(rx_ring, rx_buffer,
+							rx_desc, size);
 
-		/* exit if we failed to retrieve a buffer */
-		if (!adapter->ecdev && !skb) {
-			rx_ring->rx_stats.alloc_failed++;
-			rx_buffer->pagecnt_bias++;
-			break;
+			/* exit if we failed to retrieve a buffer */
+			if (!skb) {
+				rx_ring->rx_stats.alloc_failed++;
+				rx_buffer->pagecnt_bias++;
+				break;
+			}
+
+			igb_put_rx_buffer(rx_ring, rx_buffer);
 		}
 
-		igb_put_rx_buffer(rx_ring, rx_buffer);
 		cleaned_count++;
 
 		/* fetch next buffer in frame if non-eop */

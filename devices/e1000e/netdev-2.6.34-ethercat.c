@@ -520,6 +520,7 @@ static bool e1000_clean_rx_irq(struct e1000_adapter *adapter,
 
 		if (adapter->ecdev) {
 			ecdev_receive(adapter->ecdev, skb->data, length);
+			adapter->ec_watchdog_jiffies = jiffies;
 		} else {
 			e1000_receive_skb(adapter, netdev, skb,status,rx_desc->special);
 		}
@@ -876,6 +877,7 @@ copydone:
 
 		if (adapter->ecdev) {
 			ecdev_receive(adapter->ecdev, skb->data, length);
+			adapter->ec_watchdog_jiffies = jiffies;
 		} else {
 			e1000_receive_skb(adapter, netdev, skb,
 					  staterr, rx_desc->wb.middle.vlan);
@@ -1065,6 +1067,7 @@ static bool e1000_clean_jumbo_rx_irq(struct e1000_adapter *adapter,
 
 		if (adapter->ecdev) {
 			ecdev_receive(adapter->ecdev, skb->data, length);
+			adapter->ec_watchdog_jiffies = jiffies;
 		} else {
 			e1000_receive_skb(adapter, netdev, skb, status,
 			                  rx_desc->special);

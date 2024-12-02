@@ -977,6 +977,7 @@ static bool e1000_clean_rx_irq(struct e1000_ring *rx_ring, int *work_done,
 
 		if (adapter->ecdev) {
 			ecdev_receive(adapter->ecdev, skb->data, length);
+			adapter->ec_watchdog_jiffies = jiffies;
 		} else {
 		    e1000_receive_skb(adapter, netdev, skb, staterr,
 				      rx_desc->wb.upper.vlan);
@@ -1380,6 +1381,7 @@ copydone:
 
 		if (adapter->ecdev) {
 			ecdev_receive(adapter->ecdev, skb->data, length);
+			adapter->ec_watchdog_jiffies = jiffies;
 		} else {
 			e1000_receive_skb(adapter, netdev, skb,
 					  staterr, rx_desc->wb.middle.vlan);
@@ -1565,6 +1567,7 @@ static bool e1000_clean_jumbo_rx_irq(struct e1000_ring *rx_ring, int *work_done,
 
 		if (adapter->ecdev) {
 			ecdev_receive(adapter->ecdev, skb->data, length);
+			adapter->ec_watchdog_jiffies = jiffies;
 		} else {
 			e1000_receive_skb(adapter, netdev, skb, staterr,
 					  rx_desc->wb.upper.vlan);
@@ -6202,7 +6205,7 @@ void ec_poll(struct net_device *netdev)
 	if (jiffies - adapter->ec_watchdog_jiffies >= 2 * HZ) {
 		struct e1000_hw *hw = &adapter->hw;
 		hw->mac.get_link_status = true;
-		e1000_watchdog((unsigned long) adapter);
+		e1000_watchdog_task(&adapter->watchdog_task);
 		adapter->ec_watchdog_jiffies = jiffies;
 	}
 
@@ -6521,6 +6524,9 @@ static int __devinit e1000_probe(struct pci_dev *pdev,
 			goto err_register;
 		}
 		adapter->ec_watchdog_jiffies = jiffies;
+		if (adapter->flags2 & FLAG2_PCIM2PCI_ARBITER_WA) {
+			e_warn("Driver uses Workaround with busy wait which causes a lot of jitter!");
+		}
 	} else {
 		strlcpy(netdev->name, "eth%d", sizeof(netdev->name));
 		err = register_netdev(netdev);

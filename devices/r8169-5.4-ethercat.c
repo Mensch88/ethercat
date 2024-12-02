@@ -6308,7 +6308,7 @@ static void ec_poll(struct net_device *dev)
 	u16 status;
 
 	status = rtl_get_events(tp);
-//	rtl_ack_events(tp, status & ~tp->event_slow);
+	rtl_ack_events(tp, status & RTL_EVENT_NAPI);
 
 	if (status & RTL_EVENT_NAPI_RX) {
 		rtl_rx(dev, tp, 100); // FIXME
@@ -6320,6 +6320,7 @@ static void ec_poll(struct net_device *dev)
 
 	if (jiffies - tp->ec_watchdog_jiffies >= 2 * HZ) {
 		ecdev_set_link(tp->ecdev, netif_carrier_ok(dev) ? 1 : 0);
+		dev_info(tp_to_dev(tp), "ec_poll %d\n", netif_carrier_ok(dev) ? 1 : 0);
 		tp->ec_watchdog_jiffies = jiffies;
 	}
 }
@@ -6354,12 +6355,13 @@ static void rtl8169_rx_missed(struct net_device *dev)
 	dev->stats.rx_missed_errors += RTL_R32(tp, RxMissed) & 0xffffff;
 	RTL_W32(tp, RxMissed, 0);
 }
-
+//__rtl8169_check_link_status
 static void r8169_phylink_handler(struct net_device *ndev)
 {
 	struct rtl8169_private *tp = netdev_priv(ndev);
 	if (tp->ecdev) {
 		ecdev_set_link(tp->ecdev, netif_carrier_ok(ndev) ? 1 : 0);
+		dev_info(tp_to_dev(tp), "r8169_phylink_handler %d\n", netif_carrier_ok(ndev) ? 1 : 0);
 		return;
 	}
 	if (netif_carrier_ok(ndev)) {
@@ -6469,6 +6471,16 @@ static void rtl8169_netpoll(struct net_device *dev)
 }
 #endif
 
+static void rtl8169_check_link_status(struct net_device *dev,
+					struct rtl8169_private *tp,
+					void __iomem *ioaddr)
+{
+	if (tp->ecdev) {
+		ecdev_set_link(tp->ecdev, netif_carrier_ok(dev) ? 1 : 0);
+		dev_info(tp_to_dev(tp), "rtl8169_check_link_status %d\n", netif_carrier_ok(dev) ? 1 : 0);
+	}
+}
+
 static int rtl_open(struct net_device *dev)
 {
 	struct rtl8169_private *tp = netdev_priv(dev);
@@ -6512,7 +6524,7 @@ static int rtl_open(struct net_device *dev)
 
 	set_bit(RTL_FLAG_TASK_ENABLED, tp->wk.flags);
 
-	if (!tp->ecdev) {
+	if (!tp->ecdev) { // needed?
 		napi_enable(&tp->napi);
 	}
 
@@ -6534,6 +6546,9 @@ static int rtl_open(struct net_device *dev)
 	rtl_unlock_work(tp);
 
 	pm_runtime_put_sync(&pdev->dev);
+	if (tp->ecdev) {
+		rtl8169_check_link_status(dev, tp, tp->mmio_addr);
+	}
 out:
 	return retval;
 
@@ -6670,12 +6685,13 @@ static int rtl8169_resume(struct device *device)
 	struct net_device *dev = dev_get_drvdata(device);
 	struct rtl8169_private *tp = netdev_priv(dev);
 
+	rtl_rar_set(tp, dev->dev_addr);
+	
 	if (tp->ecdev) {
+		dev_info(tp_to_dev(tp), "rtl8169_resume\n");
 		return -EBUSY;
 	}
-
-	rtl_rar_set(tp, dev->dev_addr);
-
+	
 	clk_prepare_enable(tp->clk);
 
 	if (netif_running(dev))
@@ -6690,6 +6706,7 @@ static int rtl8169_runtime_suspend(struct device *device)
 	struct rtl8169_private *tp = netdev_priv(dev);
 
 	if (tp->ecdev) {
+		dev_info(tp_to_dev(tp), "rtl8169_runtime_suspend\n");
 		return -EBUSY;
 	}
 
@@ -6717,6 +6734,7 @@ static int rtl8169_runtime_resume(struct device *device)
 	rtl_rar_set(tp, dev->dev_addr);
 
 	if (tp->ecdev) {
+		dev_info(tp_to_dev(tp), "rtl8169_runtime_resume\n");
 		return -EBUSY;
 	}
 
@@ -7312,7 +7330,7 @@ static int rtl_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	if (jumbo_max > JUMBO_1K)
 		netif_info(tp, probe, dev,
-			   "jumbo features [frames: %d bytes, tx checksumming: %s]\n",
+			   "jumbo feature [frames: %d bytes, tx checksumming: %s]\n",
 			   jumbo_max, tp->mac_version <= RTL_GIGA_MAC_VER_06 ?
 			   "ok" : "ko");
 
@@ -7323,6 +7341,7 @@ static int rtl_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		pm_runtime_put_sync(&pdev->dev);
 	if (tp->ecdev) {
 		rc = ecdev_open(tp->ecdev);
+		netif_info(tp, probe, dev, "ec opened\n");
 		if (rc) {
 			ecdev_withdraw(tp->ecdev);
 			goto err_mdio_unregister;
