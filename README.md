@@ -55,6 +55,15 @@ the DC system-time offset against a `jiffies`-corrected application time rather 
 time the read datagram actually went on the wire, and the reference slave starts roughly
 one cycle out of lock.
 
+That one is not local to this fork any more. It travels as
+`base/0002-junyuan-dc_sync_issues.patch` in the patchset, was applied to the 1.5 line as
+*Distributed Clock fixes from Jun Yuan*, and reached the official IgH tree as `17eddce6`
+in June 2022. Two older patches from the same author are in upstream as well: an `e1000e`
+ethtool fix correcting which operations are refused while EtherCAT owns the NIC
+(`170110f7`, 2012), and a lifetime fix in `ecrt_master_sdo_download_complete()`, which had
+been keeping an asynchronously-released, kref-counted SDO request on the stack
+(`4a858fc9`, 2011).
+
 ## Why move to Vectioneer
 
 Vectioneer's fork is the **same lineage** — 1.5.2 plus the same patchset — maintained
@@ -110,9 +119,11 @@ built on this line.
 
 ## What exists only here
 
-* **Linux 5.4 device drivers**, required by the Ubuntu 18.04 + Xenomai 3 target.
-  (5.15 sources for `8139too`, `e1000`, `e1000e` and `igc` were imported from upstream
-  1.6.12 and are here as well.)
+* **Linux 5.4 device drivers**, required by the Ubuntu 18.04 + Xenomai 3 target —
+  `5b9c96b6` *add 8139too for kernel 5.4*, and `8e9efbe1` for r8169. Neither official
+  `stable-1.6` nor Vectioneer has a 5.4 `8139too`; upstream went from 4.19 straight to
+  5.10. (5.15 sources for `8139too`, `e1000`, `e1000e` and `igc` were imported from
+  upstream 1.6.12 and are here as well.)
 * `415e9477` — an `EC_EOE` guard in `master/rtdm_xenomai_v3.c`, needed to build
   `--disable-eoe` under Xenomai RTDM.
 
