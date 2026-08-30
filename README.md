@@ -10,6 +10,10 @@
 > ```
 > git clone -b stable/vectioneer https://git.vectioneer.com/pub/etherlab.git
 > ```
+>
+> A full-history mirror of that fork, with credit and branch layout documented, is at
+> [Mensch88/etherlab-vectioneer](https://github.com/Mensch88/etherlab-vectioneer) —
+> use it if you want the tree on GitHub, but Vectioneer's server stays authoritative.
 
 ## What this tree is
 
