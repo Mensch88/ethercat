@@ -5288,7 +5288,7 @@ static void e1000_watchdog_task(struct work_struct *work)
 	struct e1000_ring *tx_ring = adapter->tx_ring;
 	u32 dmoff_exit_timeout = 100, tries = 0;
 	struct e1000_hw *hw = &adapter->hw;
-	u32 link, tctl, pcim_state;
+	u32 link, tctl, pcim_state, rctl;
 
 	if (test_bit(__E1000_DOWN, &adapter->state))
 		return;
@@ -5396,6 +5396,12 @@ static void e1000_watchdog_task(struct work_struct *work)
 			tctl |= E1000_TCTL_EN;
 			ew32(TCTL, tctl);
 
+			if (adapter->ecdev) {
+				rctl = er32(RCTL);
+				rctl |= E1000_RCTL_EN;
+				ew32(RCTL, rctl);
+			}
+
 			/* Perform any post-link-up configuration before
 			 * reporting link up.
 			 */
@@ -5438,7 +5444,7 @@ static void e1000_watchdog_task(struct work_struct *work)
 			 */
 			if (adapter->flags & FLAG_RX_NEEDS_RESTART)
 				adapter->flags |= FLAG_RESTART_NOW;
-			else
+			else if (!adapter->ecdev)
 				pm_schedule_suspend(netdev->dev.parent,
 						    LINK_TIMEOUT);
 		}
@@ -5463,12 +5469,12 @@ link_up:
 	 * if there is queued Tx work it cannot be done.  So
 	 * reset the controller to flush the Tx packet buffers.
 	 */
-	if (!netif_carrier_ok(netdev) &&
+	if (!adapter->ecdev && !netif_carrier_ok(netdev) &&
 	    (e1000_desc_unused(tx_ring) + 1 < tx_ring->count))
 		adapter->flags |= FLAG_RESTART_NOW;
 
 	/* If reset is necessary, do it outside of interrupt context. */
-	if (adapter->flags & FLAG_RESTART_NOW) {
+	if (!adapter->ecdev && (adapter->flags & FLAG_RESTART_NOW)) {
 		schedule_work(&adapter->reset_task);
 		/* return immediately since reset is imminent */
 		return;
@@ -7138,6 +7144,9 @@ static __maybe_unused int e1000e_pm_runtime_idle(struct device *dev)
 	struct e1000_adapter *adapter = netdev_priv(netdev);
 	u16 eee_lp;
 
+	if (adapter->ecdev)
+		return -EBUSY;
+
 	eee_lp = adapter->hw.dev_spec.ich8lan.eee_lp_ability;
 
 	if (!e1000e_has_link(adapter)) {
@@ -7170,6 +7179,9 @@ static __maybe_unused int e1000e_pm_runtime_suspend(struct device *dev)
 	struct pci_dev *pdev = to_pci_dev(dev);
 	struct net_device *netdev = pci_get_drvdata(pdev);
 	struct e1000_adapter *adapter = netdev_priv(netdev);
+
+	if (adapter->ecdev)
+		return -EBUSY;
 
 	if (netdev->flags & IFF_UP) {
 		int count = E1000_CHECK_RESET_COUNT;
