@@ -365,6 +365,8 @@ struct e1000_adapter {
 	unsigned int ec_rx_ntc_old;
 	unsigned int ec_tx_ntu_old;
 	unsigned int ec_rx_deaf_passes;
+	unsigned int ec_rx_reinit_count;
+	bool ec_rx_armed;
 	bool ec_rx_recovering;
 };
 

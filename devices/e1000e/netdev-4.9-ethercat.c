@@ -5240,6 +5240,7 @@ static void e1000e_check_82574_phy_workaround(struct e1000_adapter *adapter)
  */
 #define EC_RX_WATCH_INTERVAL	(2 * HZ)
 #define EC_RX_DEAF_PASSES	2
+#define EC_RX_MAX_REINITS	2	/* consecutive reinit cap; prevents a reset loop when nothing is on the link */
 
 /**
  * ec_rx_watch_task - recover a receiver left deaf by a link loss
@@ -5274,17 +5275,33 @@ static void e1000e_check_82574_phy_workaround(struct e1000_adapter *adapter)
 static void ec_rx_watch_task(struct work_struct *work)
 {
 	struct e1000_adapter *adapter = container_of(to_delayed_work(work),
-						     struct e1000_adapter,
-						     ec_rx_watch);
+					     struct e1000_adapter,
+					     ec_rx_watch);
 	struct e1000_ring *rx_ring = adapter->rx_ring;
 	struct e1000_ring *tx_ring = adapter->tx_ring;
 	unsigned int rx_ntc, tx_ntu;
+	int link;
 
 	if (test_bit(__E1000_DOWN, &adapter->state))
 		return;
 
 	if (!rx_ring || !tx_ring)
 		goto rearm;
+
+	link = ecdev_get_link(adapter->ecdev);
+
+	/* Arm on link-down: a receiver that is frozen while the link never
+	 * dropped is not this fault, it is a slave that is unpowered or not
+	 * echoing, and resetting for it would only flap the link. The deaf
+	 * receiver is only ever produced by a link loss (the ME's DMoff cycle),
+	 * so only watch after the link has actually gone down.
+	 */
+	if (!link) {
+		adapter->ec_rx_armed = true;
+		adapter->ec_rx_deaf_passes = 0;
+		adapter->ec_rx_reinit_count = 0;
+		goto update_old;
+	}
 
 	/* Both counters are kept by the driver and advanced from ec_poll(), so
 	 * this costs no register access and cannot steal a clear-on-read
@@ -5293,47 +5310,74 @@ static void ec_rx_watch_task(struct work_struct *work)
 	rx_ntc = rx_ring->next_to_clean;
 	tx_ntu = tx_ring->next_to_use;
 
-	if (ecdev_get_link(adapter->ecdev) &&
-	    tx_ntu != adapter->ec_tx_ntu_old &&
-	    rx_ntc == adapter->ec_rx_ntc_old)
+	/* Link up and receiving: the receiver is healthy, disarm. */
+	if (rx_ntc != adapter->ec_rx_ntc_old) {
+		adapter->ec_rx_armed = false;
+		adapter->ec_rx_deaf_passes = 0;
+		adapter->ec_rx_reinit_count = 0;
+		goto update_old;
+	}
+
+	/* Link up but not receiving: count it only if a link loss armed the
+	 * watch and the transmit path is still moving. A link that never
+	 * dropped, or a master with nothing to send, both leave this at zero.
+	 */
+	if (adapter->ec_rx_armed && tx_ntu != adapter->ec_tx_ntu_old)
 		adapter->ec_rx_deaf_passes++;
 	else
 		adapter->ec_rx_deaf_passes = 0;
 
-	adapter->ec_rx_ntc_old = rx_ntc;
-	adapter->ec_tx_ntu_old = tx_ntu;
-
-	/* netdev_dbg() rather than e_dbg(), which needs a local hw pointer this
-	 * function has no other use for.
-	 */
-	netdev_dbg(adapter->netdev,
-		   "ec rx watch: link=%d rx_ntc=%u tx_ntu=%u deaf=%u\n",
-		   !!ecdev_get_link(adapter->ecdev), rx_ntc, tx_ntu,
-		   adapter->ec_rx_deaf_passes);
-
 	if (adapter->ec_rx_deaf_passes >= EC_RX_DEAF_PASSES) {
 		adapter->ec_rx_deaf_passes = 0;
-		e_err("Rx is deaf after a link event, reconfiguring\n");
 
-		/* Keep ec_poll() out of the ring while it is rebuilt. It runs
-		 * in the master's realtime thread, so it cannot be made to
-		 * wait on a lock; it checks a flag and returns instead. Give a
-		 * poll already inside the receive path time to leave -- the
-		 * master's cycle is far shorter than this.
-		 */
-		WRITE_ONCE(adapter->ec_rx_recovering, true);
-		usleep_range(5000, 6000);
+		if (adapter->ec_rx_reinit_count < EC_RX_MAX_REINITS) {
+			adapter->ec_rx_reinit_count++;
+			e_err("Rx is deaf after a link event, reconfiguring"
+			      " (attempt %u/%u)\n",
+			      adapter->ec_rx_reinit_count, EC_RX_MAX_REINITS);
 
-		e1000e_reinit_locked(adapter);
+			/* Keep ec_poll() and the transmit path out of the rings
+			 * while they are rebuilt. Both run in the master's
+			 * realtime thread, so they cannot be made to wait on a
+			 * lock; they check a flag and return instead. Give a poll
+			 * already inside the receive path time to leave -- the
+			 * master's cycle is far shorter than this.
+			 */
+			WRITE_ONCE(adapter->ec_rx_recovering, true);
+			usleep_range(5000, 6000);
 
-		WRITE_ONCE(adapter->ec_rx_recovering, false);
+			e1000e_reinit_locked(adapter);
 
-		adapter->ec_rx_ntc_old = rx_ring->next_to_clean;
-		adapter->ec_tx_ntu_old = tx_ring->next_to_use;
+			WRITE_ONCE(adapter->ec_rx_recovering, false);
+
+			adapter->ec_rx_ntc_old = rx_ring->next_to_clean;
+			adapter->ec_tx_ntu_old = tx_ring->next_to_use;
+		} else {
+			/* Reinit attempts are exhausted and still nothing is
+			 * received: there is no slave answering (unpowered, or an
+			 * empty switch). Disarm and wait for the next link event
+			 * instead of flapping the link forever.
+			 */
+			e_warn("Rx recovery exhausted (%u attempts) without Rx"
+			       " traffic; disarming until the next link event\n",
+			       adapter->ec_rx_reinit_count);
+			adapter->ec_rx_armed = false;
+			adapter->ec_rx_reinit_count = 0;
+		}
+
+		goto rearm;
 	}
 
+update_old:
+	adapter->ec_rx_ntc_old = rx_ring->next_to_clean;
+	adapter->ec_tx_ntu_old = tx_ring->next_to_use;
+
 rearm:
-	schedule_delayed_work(&adapter->ec_rx_watch, EC_RX_WATCH_INTERVAL);
+	/* Do not re-arm while the adapter is being removed: e1000_remove()
+	 * sets __E1000_DOWN before cancelling this work.
+	 */
+	if (!test_bit(__E1000_DOWN, &adapter->state))
+		schedule_delayed_work(&adapter->ec_rx_watch, EC_RX_WATCH_INTERVAL);
 }
 
 static void e1000_watchdog(unsigned long data)
@@ -5978,6 +6022,12 @@ static netdev_tx_t e1000_xmit_frame(struct sk_buff *skb,
 	int tso;
 	unsigned int f;
 	__be16 protocol = vlan_get_protocol(skb);
+
+	/* Keep the transmit path out of the rings while an Rx recovery
+	 * reinit rebuilds them; ec_poll() checks the same flag.
+	 */
+	if (adapter->ecdev && READ_ONCE(adapter->ec_rx_recovering))
+		return NETDEV_TX_BUSY;
 
 	if (test_bit(__E1000_DOWN, &adapter->state)) {
 		if (!adapter->ecdev)
